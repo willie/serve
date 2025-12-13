@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	addr     = flag.String("addr", ":443", "address to listen on")
+	port     = flag.String("port", "8080", "port to listen on (local mode only)")
 	hostname = flag.String("hostname", "", "hostname to use on tailnet")
 	dataDir  = flag.String("dir", "./tsnet-state", "directory to store tailscale state")
 	local    = flag.Bool("local", false, "run in local mode")
@@ -34,11 +34,6 @@ func main() {
 
 	// Globally filter logs to suppress tsnet noise
 	log.SetOutput(new(logFilter))
-
-	// Handle local mode default port
-	if *local && *addr == ":443" {
-		*addr = ":8080"
-	}
 
 	if *hostname == "" {
 		wd, err := os.Getwd()
@@ -51,13 +46,15 @@ func main() {
 	var ln net.Listener
 	var whoIs func(context.Context, string) (*apitype.WhoIsResponse, error)
 	var err error
+	var listenAddr string
 
 	if *local {
-		ln, err = net.Listen("tcp", *addr)
+		listenAddr = ":" + *port
+		ln, err = net.Listen("tcp", listenAddr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Running in local mode on %s ...", *addr)
+		log.Printf("Running in local mode on %s ...", listenAddr)
 		whoIs = func(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) {
 			return &apitype.WhoIsResponse{
 				UserProfile: &tailcfg.UserProfile{
@@ -69,6 +66,9 @@ func main() {
 			}, nil
 		}
 	} else {
+		// Production mode always enforces :443
+		listenAddr = ":443"
+
 		if err := os.MkdirAll(*dataDir, 0700); err != nil {
 			log.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func main() {
 			// We rely on the global log filter to catch tsnet logs
 		}
 		defer s.Close()
-		ln, err = s.Listen("tcp", *addr)
+		ln, err = s.Listen("tcp", listenAddr)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -97,30 +97,23 @@ func main() {
 				st, err := lc.Status(ctx)
 				if err == nil && st.BackendState == "Running" {
 					dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
-					scheme := "http"
-					if *addr == ":443" {
-						scheme = "https"
-					}
-					port := ""
-					if *addr != ":80" && *addr != ":443" {
-						port = *addr
-					}
-					log.Printf("Tailscale Server running at %s://%s%s", scheme, dnsName, port)
+					scheme := "https" // Always HTTPS in prod now
+					portStr := ""     // Standard port, no need to show
+
+					log.Printf("Tailscale Server running at %s://%s%s", scheme, dnsName, portStr)
 					return
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
 		}()
 
-		if *addr == ":443" {
-			ln = tls.NewListener(ln, &tls.Config{
-				GetCertificate: lc.GetCertificate,
-			})
-		}
+		ln = tls.NewListener(ln, &tls.Config{
+			GetCertificate: lc.GetCertificate,
+		})
 	}
 	defer ln.Close()
 
-	if !*local && *addr == ":443" {
+	if !*local && listenAddr == ":443" {
 		// (Removed old dead code comments)
 	}
 
@@ -152,7 +145,10 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 	// Whitelist specific messages
 	if strings.Contains(s, "Tailscale Server running at") ||
 		strings.Contains(s, "Running in local mode") ||
-		strings.Contains(s, "Access: ") {
+		strings.Contains(s, "Access: ") ||
+		strings.Contains(s, "bind: ") || // Allow startup errors
+		strings.Contains(s, "error") ||
+		strings.Contains(s, "fail") {
 		return os.Stderr.Write(p)
 	}
 

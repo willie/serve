@@ -31,7 +31,6 @@ On the first run, it will print a Tailscale authentication URL. Once authenticat
 
 **Options:**
 
-- `-addr <port>`: Address to listen on (default `:443`).
 - `-hostname <name>`: Hostname on your tailnet (default: current directory name).
 - `-dir <path>`: Directory to store Tailscale state (default `./tsnet-state`).
 
@@ -48,4 +47,4 @@ This binds to `:8080` by default (to distinguish from prod `:443`) and mocks the
 **Local Options:**
 
 - `-local`: Enable local mode.
-- `-addr <port>`: Address to listen on (default `:8080` in local mode).
+- `-port <number>`: Port to listen on (default `8080`, local mode only).
