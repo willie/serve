@@ -42,7 +42,7 @@ Run without connecting to Tailscale:
 serve -local
 ```
 
-This binds to `:8080` by default (to distinguish from prod `:443`) and mocks the user identity.
+This binds to `:8080` by default (to distinguish from prod `:443`) and uses a placeholder identity for access logs.
 
 **Local Options:**
 
