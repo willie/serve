@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"tailscale.com/client/tailscale/apitype"
-	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -55,19 +54,9 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("serving . at http://localhost%s ...", listenAddr)
-		whoIs = func(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) {
-			return &apitype.WhoIsResponse{
-				UserProfile: &tailcfg.UserProfile{
-					LoginName: "local-user",
-				},
-				Node: &tailcfg.Node{
-					ComputedName: "localhost",
-				},
-			}, nil
-		}
 	} else {
 		// Production mode always enforces :443
-		listenAddr = ":443"
+		listenAddr = ":" + "443"
 
 		if err := os.MkdirAll(*dataDir, 0700); err != nil {
 			log.Fatal(err)
@@ -120,9 +109,14 @@ func main() {
 	// Serve the current directory with access logging
 	fs := http.FileServer(http.Dir("."))
 	log.Fatal(http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if *local {
+			log.Printf("access: %s", r.URL.Path)
+			fs.ServeHTTP(w, r)
+			return
+		}
+
 		who, err := whoIs(r.Context(), r.RemoteAddr)
 		if err != nil {
-			// In local mode or error cases, handle gracefully
 			log.Printf("access: unknown user (%v) %s", err, r.URL.Path)
 		} else {
 			log.Printf("access: %s (%s) %s",
