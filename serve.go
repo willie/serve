@@ -54,7 +54,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Running in local mode on %s ...", listenAddr)
+		log.Printf("serving . at http://localhost%s ...", listenAddr)
 		whoIs = func(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) {
 			return &apitype.WhoIsResponse{
 				UserProfile: &tailcfg.UserProfile{
@@ -100,7 +100,7 @@ func main() {
 					scheme := "https" // Always HTTPS in prod now
 					portStr := ""     // Standard port, no need to show
 
-					log.Printf("Tailscale Server running at %s://%s%s", scheme, dnsName, portStr)
+					log.Printf("serving . at %s://%s%s", scheme, dnsName, portStr)
 					return
 				}
 				time.Sleep(500 * time.Millisecond)
@@ -123,9 +123,9 @@ func main() {
 		who, err := whoIs(r.Context(), r.RemoteAddr)
 		if err != nil {
 			// In local mode or error cases, handle gracefully
-			log.Printf("Access: unknown user (%v) %s", err, r.URL.Path)
+			log.Printf("access: unknown user (%v) %s", err, r.URL.Path)
 		} else {
-			log.Printf("Access: %s (%s) %s",
+			log.Printf("access: %s (%s) %s",
 				who.UserProfile.LoginName,
 				firstLabel(who.Node.ComputedName),
 				r.URL.Path)
@@ -143,9 +143,8 @@ type logFilter struct {
 func (f *logFilter) Write(p []byte) (n int, err error) {
 	s := string(p)
 	// Whitelist specific messages
-	if strings.Contains(s, "Tailscale Server running at") ||
-		strings.Contains(s, "Running in local mode") ||
-		strings.Contains(s, "Access: ") ||
+	if strings.Contains(s, "serving . at") ||
+		strings.Contains(s, "access: ") ||
 		strings.Contains(s, "bind: ") || // Allow startup errors
 		strings.Contains(s, "error") ||
 		strings.Contains(s, "fail") {
