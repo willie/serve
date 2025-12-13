@@ -35,17 +35,17 @@ On the first run, it will print a Tailscale authentication URL. Once authenticat
 - `-hostname <name>`: Hostname on your tailnet (default: current directory name).
 - `-dir <path>`: Directory to store Tailscale state (default `./tsnet-state`).
 
-### Local Development
+### Local Mode
 
 Run without connecting to Tailscale:
 
 ```bash
-serve -dev
+serve -local
 ```
 
 This binds to `:8080` by default (to distinguish from prod `:443`) and mocks the user identity.
 
-**Dev Options:**
+**Local Options:**
 
-- `-dev`: Enable development mode.
-- `-addr <port>`: Address to listen on (default `:8080` in dev mode).
+- `-local`: Enable local mode.
+- `-addr <port>`: Address to listen on (default `:8080` in local mode).

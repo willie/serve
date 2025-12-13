@@ -26,7 +26,7 @@ var (
 	addr     = flag.String("addr", ":443", "address to listen on")
 	hostname = flag.String("hostname", "", "hostname to use on tailnet")
 	dataDir  = flag.String("dir", "./tsnet-state", "directory to store tailscale state")
-	dev      = flag.Bool("dev", false, "run in local development mode")
+	local    = flag.Bool("local", false, "run in local mode")
 )
 
 func main() {
@@ -35,8 +35,8 @@ func main() {
 	// Globally filter logs to suppress tsnet noise
 	log.SetOutput(new(logFilter))
 
-	// Handle dev mode default port
-	if *dev && *addr == ":443" {
+	// Handle local mode default port
+	if *local && *addr == ":443" {
 		*addr = ":8080"
 	}
 
@@ -52,16 +52,16 @@ func main() {
 	var whoIs func(context.Context, string) (*apitype.WhoIsResponse, error)
 	var err error
 
-	if *dev {
+	if *local {
 		ln, err = net.Listen("tcp", *addr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Running in dev mode on %s ...", *addr)
+		log.Printf("Running in local mode on %s ...", *addr)
 		whoIs = func(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) {
 			return &apitype.WhoIsResponse{
 				UserProfile: &tailcfg.UserProfile{
-					LoginName: "local-dev-user",
+					LoginName: "local-user",
 				},
 				Node: &tailcfg.Node{
 					ComputedName: "localhost",
@@ -120,7 +120,7 @@ func main() {
 	}
 	defer ln.Close()
 
-	if !*dev && *addr == ":443" {
+	if !*local && *addr == ":443" {
 		// (Removed old dead code comments)
 	}
 
@@ -129,7 +129,7 @@ func main() {
 	log.Fatal(http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		who, err := whoIs(r.Context(), r.RemoteAddr)
 		if err != nil {
-			// In dev mode or error cases, handle gracefully
+			// In local mode or error cases, handle gracefully
 			log.Printf("Access: unknown user (%v) %s", err, r.URL.Path)
 		} else {
 			log.Printf("Access: %s (%s) %s",
@@ -151,7 +151,7 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 	s := string(p)
 	// Whitelist specific messages
 	if strings.Contains(s, "Tailscale Server running at") ||
-		strings.Contains(s, "Running in dev mode") ||
+		strings.Contains(s, "Running in local mode") ||
 		strings.Contains(s, "Access: ") {
 		return os.Stderr.Write(p)
 	}
