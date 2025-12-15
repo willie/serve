@@ -5,27 +5,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build Commands
 
 ```bash
-# Build
-go build
-
-# Run locally (dev mode, port 8080)
-go run . -local
-
-# Run production (requires Tailscale auth, port 443)
-go run .
+go build           # Build binary
+go run . -local    # Dev mode (HTTP, auto-opens browser)
+go run .           # Prod mode (Tailscale HTTPS)
 ```
 
 ## Architecture
 
-This is a single-file Go application (`serve.go`) that serves files over Tailscale's private network using `tsnet`.
+Single-file Go app (`serve.go`) serving files over Tailscale using `tsnet`.
 
 **Two modes:**
-- **Production**: Uses `tsnet.Server` to join Tailnet, auto-provisions TLS via Let's Encrypt, listens on `:443`, logs Tailscale user identity per request
-- **Local** (`-local`): Plain HTTP on configurable port (default `:8080`), no Tailscale, logs path only
+- **Production**: `tsnet.Server` joins Tailnet, auto-provisions TLS, listens `:443`, logs user identity
+- **Local** (`-local`): Plain HTTP on saved port (default `:8080`), logs path only
 
 **Key components:**
-- `tsnet.Server` - Embeds Tailscale daemon as a library
-- `logFilter` - Custom `io.Writer` that suppresses tsnet noise, throttles auth prompts
-- `whoIs` - Resolves remote address to Tailscale user identity for access logging
+- `tsnet.Server` - Embeds Tailscale daemon as library
+- `logFilter` - Suppresses tsnet noise, throttles auth prompts
+- `serveMarkdown` - Renders `.md` files as HTML (GFM), `?raw` for source
+- `openBrowser` - Auto-opens browser when ready (macOS `open`)
 
-**Tailscale state** is stored in `.serve/` directory (configurable via `-dir`).
+**`.serve/` directory:**
+- Tailscale state (prod mode)
+- `port` - Remembered port for local mode
+- `custom.css` - Optional CSS injected into markdown preview
