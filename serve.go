@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"flag"
 	"html/template"
 	"log"
@@ -28,6 +29,9 @@ import (
 	"tailscale.com/tsnet"
 )
 
+//go:embed markdown.css
+var markdownCSS string
+
 var (
 	port     = flag.String("port", "8080", "port to listen on (local mode only)")
 	hostname = flag.String("hostname", "", "hostname to use on tailnet")
@@ -46,62 +50,26 @@ var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
 <style>
-body {
-	max-width: 800px;
-	margin: 40px auto;
-	padding: 0 20px;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-	line-height: 1.6;
-	color: #24292f;
+{{.BaseCSS}}
+.markdown-body {
+	box-sizing: border-box;
+	min-width: 200px;
+	max-width: 980px;
+	margin: 0 auto;
+	padding: 45px;
 }
-@media (prefers-color-scheme: dark) {
-	body { background: #0d1117; color: #c9d1d9; }
-	a { color: #58a6ff; }
-	code, pre { background: #161b22; }
-	pre { border-color: #30363d; }
+@media (max-width: 767px) {
+	.markdown-body { padding: 15px; }
 }
-pre {
-	background: #f6f8fa;
-	padding: 16px;
-	overflow-x: auto;
-	border-radius: 6px;
-	border: 1px solid #d0d7de;
-}
-code {
-	background: #f6f8fa;
-	padding: 0.2em 0.4em;
-	border-radius: 3px;
-	font-size: 85%;
-}
-pre code {
-	background: none;
-	padding: 0;
-}
-blockquote {
-	border-left: 4px solid #d0d7de;
-	margin: 0;
-	padding-left: 16px;
-	color: #656d76;
-}
-table {
-	border-collapse: collapse;
-	width: 100%;
-}
-th, td {
-	border: 1px solid #d0d7de;
-	padding: 8px 12px;
-	text-align: left;
-}
-img { max-width: 100%; }
 .raw-link {
 	float: right;
 	font-size: 14px;
-	color: #656d76;
+	color: var(--fgColor-muted, #656d76);
 }
 {{.CustomCSS}}
 </style>
 </head>
-<body>
+<body class="markdown-body">
 <a class="raw-link" href="?raw">View raw</a>
 {{.Content}}
 </body>
@@ -369,10 +337,12 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	mdTemplate.Execute(w, struct {
 		Title     string
+		BaseCSS   template.CSS
 		Content   template.HTML
 		CustomCSS template.CSS
 	}{
 		Title:     filepath.Base(path),
+		BaseCSS:   template.CSS(markdownCSS),
 		Content:   template.HTML(buf.String()),
 		CustomCSS: template.CSS(customCSS),
 	})
