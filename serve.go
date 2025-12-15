@@ -161,7 +161,7 @@ func main() {
 		serverURL = "http://localhost" + listenAddr
 		log.Printf("%s at %s", prettyPath(), serverURL)
 	} else {
-		// Production mode always enforces :443
+		// Tailscale mode uses :443
 		listenAddr = ":443"
 
 		s := &tsnet.Server{
@@ -209,7 +209,7 @@ func main() {
 	}
 	defer ln.Close()
 
-	// Open browser for local mode (prod mode does it after Tailscale is ready)
+	// Open browser for local mode (Tailscale mode does it after ready)
 	if *local {
 		openBrowser(serverURL)
 	}
@@ -268,13 +268,13 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 	s := string(p)
 
 	// Access log lines after timestamp (20 chars: "2006/01/02 15:04:05 ")
-	// Local mode: "/path"
-	// Prod mode: "user (device) /path" or "? /path"
+	// Local: "/path"
+	// Tailscale: "user (device) /path" or "? /path"
 	if len(s) > 20 {
 		msg := s[20:]
-		if msg[0] == '/' || // Local mode access
+		if msg[0] == '/' || // Local access
 			strings.HasPrefix(msg, "? ") || // Unknown user
-			strings.Contains(msg, ") /") { // Prod mode access
+			strings.Contains(msg, ") /") { // Tailscale access
 			return os.Stderr.Write(p)
 		}
 	}

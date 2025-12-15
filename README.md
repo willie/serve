@@ -1,14 +1,14 @@
 # serve
 
-`serve` is a simple, secure file server built on [Tailscale](https://tailscale.com) and Go. It allows you to easily share files from your local machine to your private Tailscale network.
+A simple HTTP file server for your Tailscale network. Share files from any directory with automatic HTTPS and access logging.
 
 ## Features
 
-- **Private & Secure**: Accessible only over your Tailscale network.
-- **Automatic HTTPS**: Provisions valid SSL certificates automatically via Let's Encrypt + Tailscale MagicDNS.
-- **Zero Configuration**: Defaults to serving the current directory.
-- **Access Logging**: Logs which Tailscale user accessed which file.
-- **Local Dev Mode**: Includes a development mode for testing without Tailscale.
+- **Tailscale integration**: Accessible only on your tailnet with automatic HTTPS via MagicDNS
+- **Markdown preview**: Renders `.md` files as HTML with GitHub styling (`?raw` for source)
+- **Access logging**: Logs which Tailscale user accessed which file
+- **Custom CSS**: Drop `custom.css` in `.serve/` to customize markdown styling
+- **Local mode**: Run without Tailscale for testing (`-local`)
 
 ## Installation
 
@@ -18,33 +18,25 @@ go install github.com/willie/serve@latest
 
 ## Usage
 
-### Production (Tailscale)
-
-Run the server in the directory you want to share:
+### Tailscale
 
 ```bash
-# Serves the current directory on https://<machine-name>.<tailnet>.ts.net
 serve
 ```
 
-On the first run, it will print a Tailscale authentication URL. Once authenticated, it will bind to port `:443` and print your MagicDNS URL.
+Serves the current directory at `https://<hostname>.<tailnet>.ts.net`. On first run, authenticate via the printed URL.
 
 **Options:**
+- `-hostname <name>`: Hostname on your tailnet (default: directory name)
+- `-dir <path>`: State directory (default `./.serve`)
 
-- `-hostname <name>`: Hostname on your tailnet (default: current directory name).
-- `-dir <path>`: Directory to store Tailscale state (default `./.serve`).
-
-### Local Mode
-
-Run without connecting to Tailscale:
+### Local
 
 ```bash
 serve -local
 ```
 
-This binds to `:8080` by default (to distinguish from prod `:443`).
+Serves at `http://localhost:8080`. Port is remembered for next run.
 
-**Local Options:**
-
-- `-local`: Enable local mode.
-- `-port <number>`: Port to listen on (default `8080`, local mode only).
+**Options:**
+- `-port <number>`: Port to listen on (default: `8080`, or last used port)
