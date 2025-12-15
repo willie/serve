@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,7 @@ img { max-width: 100%; }
 	font-size: 14px;
 	color: #656d76;
 }
+{{.CustomCSS}}
 </style>
 </head>
 <body>
@@ -106,11 +108,23 @@ img { max-width: 100%; }
 </html>
 `))
 
+var customCSS string // loaded from .serve/custom.css if present
+
 func main() {
 	flag.Parse()
 
 	// Globally filter logs to suppress tsnet noise
 	log.SetOutput(new(logFilter))
+
+	// Ensure .serve directory exists
+	if err := os.MkdirAll(*dataDir, 0700); err != nil {
+		log.Fatal(err)
+	}
+
+	// Load custom CSS if present
+	if css, err := os.ReadFile(filepath.Join(*dataDir, "custom.css")); err == nil {
+		customCSS = string(css)
+	}
 
 	if *hostname == "" {
 		wd, err := os.Getwd()
@@ -124,21 +138,31 @@ func main() {
 	var whoIs func(context.Context, string) (*apitype.WhoIsResponse, error)
 	var err error
 	var listenAddr string
+	var serverURL string
 
 	if *local {
+		// Load saved port if not explicitly set
+		portFile := filepath.Join(*dataDir, "port")
+		if !isFlagSet("port") {
+			if saved, err := os.ReadFile(portFile); err == nil {
+				*port = strings.TrimSpace(string(saved))
+			}
+		}
+
 		listenAddr = ":" + *port
 		ln, err = net.Listen("tcp", listenAddr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("serving . at http://localhost%s ...", listenAddr)
+
+		// Save port for next time
+		os.WriteFile(portFile, []byte(*port), 0600)
+
+		serverURL = "http://localhost" + listenAddr
+		log.Printf("%s at %s", prettyPath(), serverURL)
 	} else {
 		// Production mode always enforces :443
 		listenAddr = ":443"
-
-		if err := os.MkdirAll(*dataDir, 0700); err != nil {
-			log.Fatal(err)
-		}
 
 		s := &tsnet.Server{
 			Hostname: *hostname,
@@ -165,7 +189,9 @@ func main() {
 				st, err := lc.Status(ctx)
 				if err == nil && st.BackendState == "Running" {
 					dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
-					log.Printf("serving . at https://%s", dnsName)
+					serverURL = "https://" + dnsName
+					log.Printf("%s at %s", prettyPath(), serverURL)
+					openBrowser(serverURL)
 					return
 				}
 				select {
@@ -183,6 +209,11 @@ func main() {
 	}
 	defer ln.Close()
 
+	// Open browser for local mode (prod mode does it after Tailscale is ready)
+	if *local {
+		openBrowser(serverURL)
+	}
+
 	// Serve the current directory with access logging
 	fs := http.FileServer(http.Dir("."))
 	srv := &http.Server{
@@ -190,13 +221,13 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if *local {
-				log.Printf("access: %s", r.URL.Path)
+				log.Print(r.URL.Path)
 			} else {
 				who, err := whoIs(r.Context(), r.RemoteAddr)
 				if err != nil {
-					log.Printf("access: unknown user (%v) %s", err, r.URL.Path)
+					log.Printf("? %s", r.URL.Path)
 				} else {
-					log.Printf("access: %s (%s) %s",
+					log.Printf("%s (%s) %s",
 						who.UserProfile.LoginName,
 						firstLabel(who.Node.ComputedName),
 						r.URL.Path)
@@ -235,9 +266,21 @@ type logFilter struct {
 
 func (f *logFilter) Write(p []byte) (n int, err error) {
 	s := string(p)
+
+	// Access log lines after timestamp (20 chars: "2006/01/02 15:04:05 ")
+	// Local mode: "/path"
+	// Prod mode: "user (device) /path" or "? /path"
+	if len(s) > 20 {
+		msg := s[20:]
+		if msg[0] == '/' || // Local mode access
+			strings.HasPrefix(msg, "? ") || // Unknown user
+			strings.Contains(msg, ") /") { // Prod mode access
+			return os.Stderr.Write(p)
+		}
+	}
+
 	// Whitelist specific messages
-	if strings.Contains(s, "serving . at") ||
-		strings.Contains(s, "access: ") ||
+	if strings.Contains(s, " at http") ||
 		strings.Contains(s, "bind: ") || // Allow startup errors
 		strings.Contains(s, "error") ||
 		strings.Contains(s, "fail") {
@@ -263,6 +306,36 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 func firstLabel(s string) string {
 	s, _, _ = strings.Cut(s, ".")
 	return s
+}
+
+func prettyPath() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return wd
+	}
+	if strings.HasPrefix(wd, home) {
+		return "~" + strings.TrimPrefix(wd, home)
+	}
+	return wd
+}
+
+func isFlagSet(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func openBrowser(url string) {
+	// macOS
+	exec.Command("open", url).Start()
 }
 
 func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
@@ -295,11 +368,13 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	mdTemplate.Execute(w, struct {
-		Title   string
-		Content template.HTML
+		Title     string
+		Content   template.HTML
+		CustomCSS template.CSS
 	}{
-		Title:   filepath.Base(path),
-		Content: template.HTML(buf.String()),
+		Title:     filepath.Base(path),
+		Content:   template.HTML(buf.String()),
+		CustomCSS: template.CSS(customCSS),
 	})
 	return true
 }
