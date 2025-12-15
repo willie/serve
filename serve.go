@@ -5,9 +5,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"flag"
+	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -19,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 )
@@ -29,6 +33,78 @@ var (
 	dataDir  = flag.String("dir", "./.serve", "directory to store tailscale state")
 	local    = flag.Bool("local", false, "run in local mode")
 )
+
+var md = goldmark.New(
+	goldmark.WithExtensions(extension.GFM),
+)
+
+var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+body {
+	max-width: 800px;
+	margin: 40px auto;
+	padding: 0 20px;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+	line-height: 1.6;
+	color: #24292f;
+}
+@media (prefers-color-scheme: dark) {
+	body { background: #0d1117; color: #c9d1d9; }
+	a { color: #58a6ff; }
+	code, pre { background: #161b22; }
+	pre { border-color: #30363d; }
+}
+pre {
+	background: #f6f8fa;
+	padding: 16px;
+	overflow-x: auto;
+	border-radius: 6px;
+	border: 1px solid #d0d7de;
+}
+code {
+	background: #f6f8fa;
+	padding: 0.2em 0.4em;
+	border-radius: 3px;
+	font-size: 85%;
+}
+pre code {
+	background: none;
+	padding: 0;
+}
+blockquote {
+	border-left: 4px solid #d0d7de;
+	margin: 0;
+	padding-left: 16px;
+	color: #656d76;
+}
+table {
+	border-collapse: collapse;
+	width: 100%;
+}
+th, td {
+	border: 1px solid #d0d7de;
+	padding: 8px 12px;
+	text-align: left;
+}
+img { max-width: 100%; }
+.raw-link {
+	float: right;
+	font-size: 14px;
+	color: #656d76;
+}
+</style>
+</head>
+<body>
+<a class="raw-link" href="?raw">View raw</a>
+{{.Content}}
+</body>
+</html>
+`))
 
 func main() {
 	flag.Parse()
@@ -115,18 +191,21 @@ func main() {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if *local {
 				log.Printf("access: %s", r.URL.Path)
-				fs.ServeHTTP(w, r)
-				return
+			} else {
+				who, err := whoIs(r.Context(), r.RemoteAddr)
+				if err != nil {
+					log.Printf("access: unknown user (%v) %s", err, r.URL.Path)
+				} else {
+					log.Printf("access: %s (%s) %s",
+						who.UserProfile.LoginName,
+						firstLabel(who.Node.ComputedName),
+						r.URL.Path)
+				}
 			}
 
-			who, err := whoIs(r.Context(), r.RemoteAddr)
-			if err != nil {
-				log.Printf("access: unknown user (%v) %s", err, r.URL.Path)
-			} else {
-				log.Printf("access: %s (%s) %s",
-					who.UserProfile.LoginName,
-					firstLabel(who.Node.ComputedName),
-					r.URL.Path)
+			// Render markdown files as HTML unless ?raw is requested
+			if serveMarkdown(w, r, r.URL.Path) {
+				return
 			}
 			fs.ServeHTTP(w, r)
 		}),
@@ -184,4 +263,43 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 func firstLabel(s string) string {
 	s, _, _ = strings.Cut(s, ".")
 	return s
+}
+
+func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
+	// Only handle .md files
+	if !strings.HasSuffix(strings.ToLower(path), ".md") {
+		return false
+	}
+
+	// Serve raw if requested
+	if r.URL.Query().Has("raw") {
+		return false
+	}
+
+	// Clean path and prevent directory traversal
+	clean := filepath.Clean(strings.TrimPrefix(path, "/"))
+	if strings.HasPrefix(clean, "..") {
+		return false
+	}
+
+	content, err := os.ReadFile(clean)
+	if err != nil {
+		return false // Let file server handle the error
+	}
+
+	var buf bytes.Buffer
+	if err := md.Convert(content, &buf); err != nil {
+		http.Error(w, "failed to render markdown", http.StatusInternalServerError)
+		return true
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	mdTemplate.Execute(w, struct {
+		Title   string
+		Content template.HTML
+	}{
+		Title:   filepath.Base(path),
+		Content: template.HTML(buf.String()),
+	})
+	return true
 }
