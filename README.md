@@ -32,7 +32,7 @@ On the first run, it will print a Tailscale authentication URL. Once authenticat
 **Options:**
 
 - `-hostname <name>`: Hostname on your tailnet (default: current directory name).
-- `-dir <path>`: Directory to store Tailscale state (default `./tsnet-state`).
+- `-dir <path>`: Directory to store Tailscale state (default `./.serve`).
 
 ### Local Mode
 
