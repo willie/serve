@@ -1,6 +1,6 @@
 # serve
 
-A simple HTTP file server for your Tailscale network. Share files from any directory with automatic HTTPS and access logging.
+A simple HTTP file server for your Tailscale network, or locally for quick sharing. Automatic HTTPS, markdown preview, and access logging.
 
 ## Features
 
