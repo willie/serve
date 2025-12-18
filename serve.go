@@ -80,6 +80,7 @@ var customCSS string // loaded from .serve/custom.css if present
 
 func main() {
 	flag.Parse()
+	ensureGitignore()
 
 	// Globally filter logs to suppress tsnet noise
 	log.SetOutput(new(logFilter))
@@ -285,8 +286,8 @@ func prettyPath() string {
 	if err != nil {
 		return wd
 	}
-	if strings.HasPrefix(wd, home) {
-		return "~" + strings.TrimPrefix(wd, home)
+	if after, ok := strings.CutPrefix(wd, home); ok {
+		return "~" + after
 	}
 	return wd
 }
@@ -347,4 +348,44 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		CustomCSS: template.CSS(customCSS),
 	})
 	return true
+}
+
+func ensureGitignore() {
+	const entry = ".serve/"
+	const comment = "# Comment the line below if you really want to commit .serve/"
+
+	if _, err := os.Stat(".git"); os.IsNotExist(err) {
+		return // Not a git repo
+	}
+
+	data, err := os.ReadFile(".gitignore")
+	if err != nil && !os.IsNotExist(err) {
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == entry || (strings.HasPrefix(line, "#") && strings.TrimSpace(strings.TrimPrefix(line, "#")) == entry) {
+			found = true
+			break
+		}
+	}
+
+	if found {
+		return
+	}
+
+	// Append to .gitignore
+	f, err := os.OpenFile(".gitignore", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		f.WriteString("\n")
+	}
+	f.WriteString("\n" + comment + "\n" + entry + "\n")
 }

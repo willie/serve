@@ -2,7 +2,10 @@ module github.com/willie/serve
 
 go 1.25.5
 
-require tailscale.com v1.92.2
+require (
+	github.com/yuin/goldmark v1.7.13
+	tailscale.com v1.92.2
+)
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -36,7 +39,6 @@ require (
 	github.com/tailscale/web-client-prebuilt v0.0.0-20250124233751-d4cd19a26976 // indirect
 	github.com/tailscale/wireguard-go v0.0.0-20250716170648-1d0488a3d7da // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	github.com/yuin/goldmark v1.7.13 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/crypto v0.45.0 // indirect
