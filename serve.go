@@ -40,6 +40,7 @@ var (
 	dataDir  = flag.String("dir", "./.serve", "directory to store tailscale state")
 	local    = flag.Bool("local", false, "run in local mode")
 	proxy    = flag.String("proxy", "", "proxy requests to this URL (e.g. http://127.0.0.1:8000)")
+	index    = flag.String("index", "README.md", "default file to serve for directories (empty to disable)")
 )
 
 var md = goldmark.New(
@@ -86,7 +87,6 @@ var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 `))
 
 var customCSS string // loaded from .serve/custom.css if present
-var indexFile string // loaded from .serve/index if present
 
 func main() {
 	flag.Parse()
@@ -105,11 +105,6 @@ func main() {
 		customCSS = string(css)
 	}
 
-	// Load index file name if present
-	if idx, err := os.ReadFile(filepath.Join(*dataDir, "index")); err == nil {
-		indexFile = strings.TrimSpace(string(idx))
-	}
-
 	if *hostname == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -120,9 +115,15 @@ func main() {
 
 	// Load saved preferences if not explicitly set
 	proxyFile := filepath.Join(*dataDir, "proxy")
+	indexCfgFile := filepath.Join(*dataDir, "index")
 	if !isFlagSet("proxy") {
 		if saved, err := os.ReadFile(proxyFile); err == nil {
 			*proxy = strings.TrimSpace(string(saved))
+		}
+	}
+	if !isFlagSet("index") {
+		if saved, err := os.ReadFile(indexCfgFile); err == nil {
+			*index = strings.TrimSpace(string(saved))
 		}
 	}
 
@@ -155,6 +156,7 @@ func main() {
 		// Save preferences for next time
 		os.WriteFile(portFile, []byte(*port), 0600)
 		os.WriteFile(proxyFile, []byte(*proxy), 0600)
+		os.WriteFile(indexCfgFile, []byte(*index), 0600)
 
 		serverURL = "http://localhost" + listenAddr
 		log.Printf("%s at %s", desc, serverURL)
@@ -205,8 +207,9 @@ func main() {
 			GetCertificate: lc.GetCertificate,
 		})
 
-		// Save proxy preference in Tailscale mode too
+		// Save preferences in Tailscale mode too
 		os.WriteFile(proxyFile, []byte(*proxy), 0600)
+		os.WriteFile(indexCfgFile, []byte(*index), 0600)
 	}
 	defer ln.Close()
 
@@ -260,10 +263,10 @@ func main() {
 			path := r.URL.Path
 
 			// Serve index file for directory requests unless ?list is present
-			if strings.HasSuffix(path, "/") && indexFile != "" && !r.URL.Query().Has("list") {
-				indexPath := filepath.Join(".", path, indexFile)
+			if strings.HasSuffix(path, "/") && *index != "" && !r.URL.Query().Has("list") {
+				indexPath := filepath.Join(".", path, *index)
 				if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
-					path = filepath.Join(path, indexFile)
+					path = filepath.Join(path, *index)
 				}
 			}
 
@@ -405,14 +408,14 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		dir = ""
 	}
 	var browsePath string
-	if indexFile != "" && filepath.Base(path) == indexFile {
+	if *index != "" && filepath.Base(path) == *index {
 		// Current file is the index file, browse shows directory listing
 		browsePath = dir + "/?list"
-	} else if indexFile != "" {
+	} else if *index != "" {
 		// Check if index file exists in this directory
-		indexPath := filepath.Join(".", dir, indexFile)
+		indexPath := filepath.Join(".", dir, *index)
 		if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
-			browsePath = dir + "/" + indexFile
+			browsePath = dir + "/" + *index
 		} else {
 			browsePath = dir + "/"
 		}
