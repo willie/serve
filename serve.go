@@ -14,6 +14,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -37,6 +39,7 @@ var (
 	hostname = flag.String("hostname", "", "hostname to use on tailnet")
 	dataDir  = flag.String("dir", "./.serve", "directory to store tailscale state")
 	local    = flag.Bool("local", false, "run in local mode")
+	proxy    = flag.String("proxy", "", "proxy requests to this URL (e.g. http://127.0.0.1:8000)")
 )
 
 var md = goldmark.New(
@@ -61,22 +64,29 @@ var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 @media (max-width: 767px) {
 	.markdown-body { padding: 15px; }
 }
-.raw-link {
+.controls {
 	float: right;
 	font-size: 14px;
+}
+.controls a {
 	color: var(--fgColor-muted, #656d76);
+	margin-left: 16px;
 }
 {{.CustomCSS}}
 </style>
 </head>
 <body class="markdown-body">
-<a class="raw-link" href="?raw">View raw</a>
+<div class="controls">
+<a href="{{.BrowsePath}}">Browse</a>
+<a href="?raw">View raw</a>
+</div>
 {{.Content}}
 </body>
 </html>
 `))
 
 var customCSS string // loaded from .serve/custom.css if present
+var indexFile string // loaded from .serve/index if present
 
 func main() {
 	flag.Parse()
@@ -95,6 +105,11 @@ func main() {
 		customCSS = string(css)
 	}
 
+	// Load index file name if present
+	if idx, err := os.ReadFile(filepath.Join(*dataDir, "index")); err == nil {
+		indexFile = strings.TrimSpace(string(idx))
+	}
+
 	if *hostname == "" {
 		wd, err := os.Getwd()
 		if err != nil {
@@ -103,11 +118,24 @@ func main() {
 		*hostname = filepath.Base(wd)
 	}
 
+	// Load saved preferences if not explicitly set
+	proxyFile := filepath.Join(*dataDir, "proxy")
+	if !isFlagSet("proxy") {
+		if saved, err := os.ReadFile(proxyFile); err == nil {
+			*proxy = strings.TrimSpace(string(saved))
+		}
+	}
+
 	var ln net.Listener
 	var whoIs func(context.Context, string) (*apitype.WhoIsResponse, error)
 	var err error
 	var listenAddr string
 	var serverURL string
+
+	desc := prettyPath()
+	if *proxy != "" {
+		desc = "proxy to " + *proxy
+	}
 
 	if *local {
 		// Load saved port if not explicitly set
@@ -124,11 +152,12 @@ func main() {
 			log.Fatal(err)
 		}
 
-		// Save port for next time
+		// Save preferences for next time
 		os.WriteFile(portFile, []byte(*port), 0600)
+		os.WriteFile(proxyFile, []byte(*proxy), 0600)
 
 		serverURL = "http://localhost" + listenAddr
-		log.Printf("%s at %s", prettyPath(), serverURL)
+		log.Printf("%s at %s", desc, serverURL)
 	} else {
 		// Tailscale mode uses :443
 		listenAddr = ":443"
@@ -159,7 +188,7 @@ func main() {
 				if err == nil && st.BackendState == "Running" {
 					dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
 					serverURL = "https://" + dnsName
-					log.Printf("%s at %s", prettyPath(), serverURL)
+					log.Printf("%s at %s", desc, serverURL)
 					openBrowser(serverURL)
 					return
 				}
@@ -175,6 +204,9 @@ func main() {
 		ln = tls.NewListener(ln, &tls.Config{
 			GetCertificate: lc.GetCertificate,
 		})
+
+		// Save proxy preference in Tailscale mode too
+		os.WriteFile(proxyFile, []byte(*proxy), 0600)
 	}
 	defer ln.Close()
 
@@ -183,7 +215,24 @@ func main() {
 		openBrowser(serverURL)
 	}
 
-	// Serve the current directory with access logging
+	// Serve the current directory or proxy with access logging
+	var rp *httputil.ReverseProxy
+	if *proxy != "" {
+		u, err := url.Parse(*proxy)
+		if err != nil {
+			log.Fatal(err)
+		}
+		rp = &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(u)
+				// pr.SetXForwarded() is NOT called to keep it "pure"
+				// Additionally strip any proxy headers that might have been present in the original request
+				pr.Out.Header.Del("X-Forwarded-For")
+				pr.Out.Header.Del("X-Forwarded-Host")
+				pr.Out.Header.Del("X-Forwarded-Proto")
+			},
+		}
+	}
 	fs := http.FileServer(http.Dir("."))
 	srv := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second,
@@ -203,8 +252,23 @@ func main() {
 				}
 			}
 
+			if rp != nil {
+				rp.ServeHTTP(w, r)
+				return
+			}
+
+			path := r.URL.Path
+
+			// Serve index file for directory requests unless ?list is present
+			if strings.HasSuffix(path, "/") && indexFile != "" && !r.URL.Query().Has("list") {
+				indexPath := filepath.Join(".", path, indexFile)
+				if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
+					path = filepath.Join(path, indexFile)
+				}
+			}
+
 			// Render markdown files as HTML unless ?raw is requested
-			if serveMarkdown(w, r, r.URL.Path) {
+			if serveMarkdown(w, r, path) {
 				return
 			}
 			fs.ServeHTTP(w, r)
@@ -335,17 +399,40 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		return true
 	}
 
+	// Compute browse path
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "/" {
+		dir = ""
+	}
+	var browsePath string
+	if indexFile != "" && filepath.Base(path) == indexFile {
+		// Current file is the index file, browse shows directory listing
+		browsePath = dir + "/?list"
+	} else if indexFile != "" {
+		// Check if index file exists in this directory
+		indexPath := filepath.Join(".", dir, indexFile)
+		if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
+			browsePath = dir + "/" + indexFile
+		} else {
+			browsePath = dir + "/"
+		}
+	} else {
+		browsePath = dir + "/"
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	mdTemplate.Execute(w, struct {
-		Title     string
-		BaseCSS   template.CSS
-		Content   template.HTML
-		CustomCSS template.CSS
+		Title      string
+		BaseCSS    template.CSS
+		Content    template.HTML
+		CustomCSS  template.CSS
+		BrowsePath string
 	}{
-		Title:     filepath.Base(path),
-		BaseCSS:   template.CSS(markdownCSS),
-		Content:   template.HTML(buf.String()),
-		CustomCSS: template.CSS(customCSS),
+		Title:      filepath.Base(path),
+		BaseCSS:    template.CSS(markdownCSS),
+		Content:    template.HTML(buf.String()),
+		CustomCSS:  template.CSS(customCSS),
+		BrowsePath: browsePath,
 	})
 	return true
 }
