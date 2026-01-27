@@ -337,7 +337,6 @@ func main() {
 type logFilter struct {
 	mu       sync.Mutex
 	lastAuth time.Time
-	auth     bool
 }
 
 func (f *logFilter) Write(p []byte) (n int, err error) {
@@ -367,9 +366,8 @@ func (f *logFilter) Write(p []byte) (n int, err error) {
 	if strings.Contains(s, "To start this tsnet server") {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if !f.auth || time.Since(f.lastAuth) > 1*time.Minute {
+		if time.Since(f.lastAuth) > time.Minute {
 			f.lastAuth = time.Now()
-			f.auth = true
 			return os.Stderr.Write(p)
 		}
 		return len(p), nil
