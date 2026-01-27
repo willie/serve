@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,7 @@ var (
 	hostname = flag.String("hostname", "", "hostname to use on tailnet")
 	dataDir  = flag.String("dir", "./.serve", "directory to store tailscale state")
 	local    = flag.Bool("local", false, "run in local mode")
+	ts       = flag.Bool("ts", false, "run in Tailscale mode")
 	proxy    = flag.String("proxy", "", "proxy requests to this URL (e.g. http://127.0.0.1:8000)")
 	index    = flag.String("index", "README.md", "default file to serve for directories (empty to disable)")
 )
@@ -116,6 +118,7 @@ func main() {
 	// Load saved preferences if not explicitly set
 	proxyFile := filepath.Join(*dataDir, "proxy")
 	indexCfgFile := filepath.Join(*dataDir, "index")
+	portFile := filepath.Join(*dataDir, "port")
 	if !isFlagSet("proxy") {
 		if saved, err := os.ReadFile(proxyFile); err == nil {
 			*proxy = strings.TrimSpace(string(saved))
@@ -125,6 +128,22 @@ func main() {
 		if saved, err := os.ReadFile(indexCfgFile); err == nil {
 			*index = strings.TrimSpace(string(saved))
 		}
+	}
+
+	// Determine mode: local vs Tailscale
+	// Priority: -local flag > -ts flag > existing TS state > existing port config > default local
+	useLocalMode := false
+	switch {
+	case *local:
+		useLocalMode = true
+	case *ts:
+		useLocalMode = false
+	case hasTailscaleState(*dataDir):
+		useLocalMode = false
+	case hasLocalConfig(*dataDir):
+		useLocalMode = true
+	default:
+		useLocalMode = true // Default to local mode
 	}
 
 	var ln net.Listener
@@ -138,25 +157,42 @@ func main() {
 		desc = "proxy to " + *proxy
 	}
 
-	if *local {
+	if useLocalMode {
 		// Load saved port if not explicitly set
-		portFile := filepath.Join(*dataDir, "port")
 		if !isFlagSet("port") {
 			if saved, err := os.ReadFile(portFile); err == nil {
 				*port = strings.TrimSpace(string(saved))
 			}
 		}
 
-		listenAddr = ":" + *port
-		ln, err = net.Listen("tcp", listenAddr)
-		if err != nil {
-			log.Fatal(err)
-		}
+		// Determine if we should save port (only when explicitly set or port config exists)
+		savePort := isFlagSet("port") || hasLocalConfig(*dataDir)
 
-		// Save preferences for next time
-		os.WriteFile(portFile, []byte(*port), 0600)
-		os.WriteFile(proxyFile, []byte(*proxy), 0600)
-		os.WriteFile(indexCfgFile, []byte(*index), 0600)
+		if !savePort {
+			// Dynamic port finding for unconfigured local mode
+			*port, ln, err = findAvailablePort()
+			if err != nil {
+				log.Fatal(err)
+			}
+		} else {
+			listenAddr = ":" + *port
+			ln, err = net.Listen("tcp", listenAddr)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		listenAddr = ":" + *port
+
+		// Save preferences only when explicitly set
+		if isFlagSet("port") {
+			os.WriteFile(portFile, []byte(*port), 0600)
+		}
+		if isFlagSet("proxy") {
+			os.WriteFile(proxyFile, []byte(*proxy), 0600)
+		}
+		if isFlagSet("index") {
+			os.WriteFile(indexCfgFile, []byte(*index), 0600)
+		}
 
 		serverURL = "http://localhost" + listenAddr
 		log.Printf("%s at %s", desc, serverURL)
@@ -207,14 +243,18 @@ func main() {
 			GetCertificate: lc.GetCertificate,
 		})
 
-		// Save preferences in Tailscale mode too
-		os.WriteFile(proxyFile, []byte(*proxy), 0600)
-		os.WriteFile(indexCfgFile, []byte(*index), 0600)
+		// Save preferences only when explicitly set
+		if isFlagSet("proxy") {
+			os.WriteFile(proxyFile, []byte(*proxy), 0600)
+		}
+		if isFlagSet("index") {
+			os.WriteFile(indexCfgFile, []byte(*index), 0600)
+		}
 	}
 	defer ln.Close()
 
 	// Open browser for local mode (Tailscale mode does it after ready)
-	if *local {
+	if useLocalMode {
 		openBrowser(serverURL)
 	}
 
@@ -241,7 +281,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if *local {
+			if useLocalMode {
 				log.Print(r.URL.Path)
 			} else {
 				who, err := whoIs(r.Context(), r.RemoteAddr)
@@ -367,6 +407,33 @@ func isFlagSet(name string) bool {
 		}
 	})
 	return found
+}
+
+func hasTailscaleState(dataDir string) bool {
+	_, err := os.Stat(filepath.Join(dataDir, "tailscaled.state"))
+	return err == nil
+}
+
+func hasLocalConfig(dataDir string) bool {
+	_, err := os.Stat(filepath.Join(dataDir, "port"))
+	return err == nil
+}
+
+func findAvailablePort() (string, net.Listener, error) {
+	for p := 8080; p < 9000; p++ {
+		addr := ":" + strconv.Itoa(p)
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			return strconv.Itoa(p), ln, nil
+		}
+	}
+	// Let OS pick if all ports busy
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return "", nil, err
+	}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	return port, ln, nil
 }
 
 func openBrowser(url string) {
