@@ -5,12 +5,15 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/tls"
 	_ "embed"
+	"encoding/base64"
 	"flag"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,7 +86,35 @@ var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 <div class="controls">
 <a href="{{.BrowsePath}}">Browse</a>
 <a href="?raw">View raw</a>
+<a href="?download">Download HTML</a>
 </div>
+{{.Content}}
+</body>
+</html>
+`))
+
+var mdTemplateStandalone = template.Must(template.New("markdown-standalone").Parse(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+{{.BaseCSS}}
+.markdown-body {
+	box-sizing: border-box;
+	min-width: 200px;
+	max-width: 980px;
+	margin: 0 auto;
+	padding: 45px;
+}
+@media (max-width: 767px) {
+	.markdown-body { padding: 15px; }
+}
+{{.CustomCSS}}
+</style>
+</head>
+<body class="markdown-body">
 {{.Content}}
 </body>
 </html>
@@ -467,6 +499,66 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		return true
 	}
 
+	// Handle download request
+	if r.URL.Query().Has("download") {
+		// Render standalone HTML (without controls)
+		var htmlBuf bytes.Buffer
+		err := mdTemplateStandalone.Execute(&htmlBuf, struct {
+			Title     string
+			BaseCSS   template.CSS
+			Content   template.HTML
+			CustomCSS template.CSS
+		}{
+			Title:     filepath.Base(path),
+			BaseCSS:   template.CSS(markdownCSS),
+			Content:   template.HTML(buf.String()),
+			CustomCSS: template.CSS(customCSS),
+		})
+		if err != nil {
+			http.Error(w, "failed to generate HTML", http.StatusInternalServerError)
+			return true
+		}
+
+		// Embed images as data URIs
+		htmlWithImages, err := embedImages(htmlBuf.Bytes(), clean)
+		if err != nil {
+			http.Error(w, "failed to embed images", http.StatusInternalServerError)
+			return true
+		}
+
+		// Create filename for HTML (change .md to .html)
+		htmlFilename := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)) + ".html"
+		zipFilename := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)) + ".zip"
+
+		// Create zip file in memory
+		var zipBuf bytes.Buffer
+		zipWriter := zip.NewWriter(&zipBuf)
+
+		// Add HTML file to zip
+		htmlFile, err := zipWriter.Create(htmlFilename)
+		if err != nil {
+			http.Error(w, "failed to create zip", http.StatusInternalServerError)
+			return true
+		}
+		if _, err := io.Copy(htmlFile, bytes.NewReader(htmlWithImages)); err != nil {
+			http.Error(w, "failed to write HTML to zip", http.StatusInternalServerError)
+			return true
+		}
+
+		// Close zip writer
+		if err := zipWriter.Close(); err != nil {
+			http.Error(w, "failed to finalize zip", http.StatusInternalServerError)
+			return true
+		}
+
+		// Send zip file
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+zipFilename+"\"")
+		w.Header().Set("Content-Length", strconv.Itoa(zipBuf.Len()))
+		w.Write(zipBuf.Bytes())
+		return true
+	}
+
 	// Compute browse path
 	dir := filepath.Dir(path)
 	if dir == "." || dir == "/" {
@@ -503,6 +595,73 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		BrowsePath: browsePath,
 	})
 	return true
+}
+
+func getMimeType(filepath string) string {
+	ext := strings.ToLower(filepath[strings.LastIndex(filepath, ".")+1:])
+	switch ext {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	case "svg":
+		return "image/svg+xml"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func embedImages(htmlContent []byte, basePath string) ([]byte, error) {
+	// Regex to find <img src="..."> tags with local paths
+	imgRegex := regexp.MustCompile(`<img([^>]*)\ssrc="([^"]+)"([^>]*)>`)
+	
+	result := imgRegex.ReplaceAllFunc(htmlContent, func(match []byte) []byte {
+		// Extract the src value
+		srcMatch := regexp.MustCompile(`src="([^"]+)"`).FindSubmatch(match)
+		if len(srcMatch) < 2 {
+			return match // Keep original if we can't parse
+		}
+		
+		src := string(srcMatch[1])
+		
+		// Skip absolute URLs (http://, https://, //)
+		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "//") {
+			return match
+		}
+		
+		// Skip data URIs (already embedded)
+		if strings.HasPrefix(src, "data:") {
+			return match
+		}
+		
+		// Construct file path relative to the markdown file's directory
+		imgPath := filepath.Join(filepath.Dir(basePath), src)
+		
+		// Read the image file
+		imgData, err := os.ReadFile(imgPath)
+		if err != nil {
+			// If we can't read the file, keep the original reference
+			return match
+		}
+		
+		// Encode as base64
+		encoded := base64.StdEncoding.EncodeToString(imgData)
+		
+		// Determine MIME type
+		mimeType := getMimeType(imgPath)
+		
+		// Create data URI
+		dataURI := "data:" + mimeType + ";base64," + encoded
+		
+		// Replace the src with the data URI
+		return []byte(strings.Replace(string(match), src, dataURI, 1))
+	})
+	
+	return result, nil
 }
 
 func ensureGitignore() {
