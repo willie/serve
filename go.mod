@@ -1,9 +1,10 @@
 module github.com/willie/serve
 
-go 1.25.5
+go 1.26
 
 require (
 	github.com/yuin/goldmark v1.7.13
+	go.abhg.dev/goldmark/mermaid v0.6.0
 	tailscale.com v1.92.2
 )
 
