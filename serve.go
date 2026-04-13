@@ -32,6 +32,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
+	"go.abhg.dev/goldmark/mermaid"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 )
@@ -50,7 +51,7 @@ var (
 )
 
 var md = goldmark.New(
-	goldmark.WithExtensions(extension.GFM),
+	goldmark.WithExtensions(extension.GFM, &mermaid.Extender{}),
 )
 
 var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
@@ -618,49 +619,49 @@ func getMimeType(filepath string) string {
 func embedImages(htmlContent []byte, basePath string) ([]byte, error) {
 	// Regex to find <img src="..."> tags with local paths
 	imgRegex := regexp.MustCompile(`<img([^>]*)\ssrc="([^"]+)"([^>]*)>`)
-	
+
 	result := imgRegex.ReplaceAllFunc(htmlContent, func(match []byte) []byte {
 		// Extract the src value
 		srcMatch := regexp.MustCompile(`src="([^"]+)"`).FindSubmatch(match)
 		if len(srcMatch) < 2 {
 			return match // Keep original if we can't parse
 		}
-		
+
 		src := string(srcMatch[1])
-		
+
 		// Skip absolute URLs (http://, https://, //)
 		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "//") {
 			return match
 		}
-		
+
 		// Skip data URIs (already embedded)
 		if strings.HasPrefix(src, "data:") {
 			return match
 		}
-		
+
 		// Construct file path relative to the markdown file's directory
 		imgPath := filepath.Join(filepath.Dir(basePath), src)
-		
+
 		// Read the image file
 		imgData, err := os.ReadFile(imgPath)
 		if err != nil {
 			// If we can't read the file, keep the original reference
 			return match
 		}
-		
+
 		// Encode as base64
 		encoded := base64.StdEncoding.EncodeToString(imgData)
-		
+
 		// Determine MIME type
 		mimeType := getMimeType(imgPath)
-		
+
 		// Create data URI
 		dataURI := "data:" + mimeType + ";base64," + encoded
-		
+
 		// Replace the src with the data URI
 		return []byte(strings.Replace(string(match), src, dataURI, 1))
 	})
-	
+
 	return result, nil
 }
 
