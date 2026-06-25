@@ -14,7 +14,9 @@ import (
 	"flag"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -29,9 +31,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"go.abhg.dev/goldmark/mermaid"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
@@ -51,8 +58,85 @@ var (
 )
 
 var md = goldmark.New(
-	goldmark.WithExtensions(extension.GFM, &mermaid.Extender{}),
+	goldmark.WithExtensions(extension.GFM, &mermaid.Extender{}, githubHeadingIDs{}),
 )
+
+type githubHeadingIDs struct{}
+
+func (githubHeadingIDs) Extend(m goldmark.Markdown) {
+	m.Parser().AddOptions(parser.WithASTTransformers(
+		util.Prioritized(githubHeadingIDTransformer{}, 100),
+	))
+}
+
+type githubHeadingIDTransformer struct{}
+
+func (githubHeadingIDTransformer) Transform(doc *ast.Document, reader text.Reader, _ parser.Context) {
+	source := reader.Source()
+	seen := make(map[string]int)
+	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		h, ok := n.(*ast.Heading)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		if _, ok := h.Attribute([]byte("id")); ok {
+			return ast.WalkSkipChildren, nil
+		}
+		base := githubSlug(headingText(h, source))
+		id := base
+		if n, ok := seen[base]; ok {
+			id = base + "-" + strconv.Itoa(n)
+			seen[base] = n + 1
+		} else {
+			seen[base] = 1
+		}
+		h.SetAttribute([]byte("id"), []byte(id))
+		return ast.WalkSkipChildren, nil
+	})
+}
+
+func headingText(h *ast.Heading, source []byte) string {
+	var b strings.Builder
+	ast.Walk(h, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch t := n.(type) {
+		case *ast.Text:
+			b.Write(t.Segment.Value(source))
+		case *ast.String:
+			b.Write(t.Value)
+		case *ast.CodeSpan:
+			for c := t.FirstChild(); c != nil; c = c.NextSibling() {
+				if tx, ok := c.(*ast.Text); ok {
+					b.Write(tx.Segment.Value(source))
+				}
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return b.String()
+}
+
+func githubSlug(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r == ' ':
+			b.WriteByte('-')
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 <html>
@@ -88,6 +172,7 @@ var mdTemplate = template.Must(template.New("markdown").Parse(`<!DOCTYPE html>
 <a href="{{.BrowsePath}}">Browse</a>
 <a href="?raw">View raw</a>
 <a href="?download">Download HTML</a>
+<a href="{{.ExportPath}}">Export folder</a>
 </div>
 {{.Content}}
 </body>
@@ -117,6 +202,52 @@ var mdTemplateStandalone = template.Must(template.New("markdown-standalone").Par
 </head>
 <body class="markdown-body">
 {{.Content}}
+</body>
+</html>
+`))
+
+var dirListTemplate = template.Must(template.New("dirlist").Parse(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+{{.BaseCSS}}
+.markdown-body {
+	box-sizing: border-box;
+	min-width: 200px;
+	max-width: 980px;
+	margin: 0 auto;
+	padding: 45px;
+}
+@media (max-width: 767px) {
+	.markdown-body { padding: 15px; }
+}
+.controls {
+	float: right;
+	font-size: 14px;
+}
+.controls a {
+	color: var(--fgColor-muted, #656d76);
+	margin-left: 16px;
+}
+ul.dir {
+	list-style: none;
+	padding-left: 0;
+}
+ul.dir li {
+	padding: 2px 0;
+}
+{{.CustomCSS}}
+</style>
+</head>
+<body class="markdown-body">
+<div class="controls"><a href="?export">Download HTML zip</a></div>
+<h1>{{.Title}}</h1>
+<ul class="dir">
+{{range .Entries}}<li><a href="{{.Href}}">{{.Name}}</a></li>
+{{end}}</ul>
 </body>
 </html>
 `))
@@ -335,6 +466,13 @@ func main() {
 
 			path := r.URL.Path
 
+			// Export a directory tree as a browsable HTML+assets bundle
+			if strings.HasSuffix(path, "/") && r.URL.Query().Has("export") {
+				if serveExport(w, r, path) {
+					return
+				}
+			}
+
 			// Serve index file for directory requests unless ?list is present
 			if strings.HasSuffix(path, "/") && *index != "" && !r.URL.Query().Has("list") {
 				indexPath := filepath.Join(".", path, *index)
@@ -345,6 +483,12 @@ func main() {
 
 			// Render markdown files as HTML unless ?raw is requested
 			if serveMarkdown(w, r, path) {
+				return
+			}
+
+			// Render our own directory listing (with an export link) unless an
+			// index file substitution already changed the path above.
+			if strings.HasSuffix(path, "/") && serveDirList(w, r, path) {
 				return
 			}
 			fs.ServeHTTP(w, r)
@@ -535,8 +679,12 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		var zipBuf bytes.Buffer
 		zipWriter := zip.NewWriter(&zipBuf)
 
-		// Add HTML file to zip
-		htmlFile, err := zipWriter.Create(htmlFilename)
+		// Add HTML file to zip, carrying the source file's mod time
+		mod := time.Time{}
+		if info, err := os.Stat(clean); err == nil {
+			mod = info.ModTime()
+		}
+		htmlFile, err := zipEntry(zipWriter, htmlFilename, mod)
 		if err != nil {
 			http.Error(w, "failed to create zip", http.StatusInternalServerError)
 			return true
@@ -588,54 +736,35 @@ func serveMarkdown(w http.ResponseWriter, r *http.Request, path string) bool {
 		Content    template.HTML
 		CustomCSS  template.CSS
 		BrowsePath string
+		ExportPath string
 	}{
 		Title:      filepath.Base(path),
 		BaseCSS:    template.CSS(markdownCSS),
 		Content:    template.HTML(buf.String()),
 		CustomCSS:  template.CSS(customCSS),
 		BrowsePath: browsePath,
+		ExportPath: dir + "/?export",
 	})
 	return true
 }
 
-func getMimeType(filepath string) string {
-	ext := strings.ToLower(filepath[strings.LastIndex(filepath, ".")+1:])
-	switch ext {
-	case "png":
-		return "image/png"
-	case "jpg", "jpeg":
-		return "image/jpeg"
-	case "gif":
-		return "image/gif"
-	case "webp":
-		return "image/webp"
-	case "svg":
-		return "image/svg+xml"
-	default:
-		return "application/octet-stream"
+func getMimeType(name string) string {
+	if t := mime.TypeByExtension(filepath.Ext(name)); t != "" {
+		return t
 	}
+	return "application/octet-stream"
 }
 
+var imgRegex = regexp.MustCompile(`(<img\b[^>]*?\ssrc=")([^"]+)(")`)
+
 func embedImages(htmlContent []byte, basePath string) ([]byte, error) {
-	// Regex to find <img src="..."> tags with local paths
-	imgRegex := regexp.MustCompile(`<img([^>]*)\ssrc="([^"]+)"([^>]*)>`)
-
 	result := imgRegex.ReplaceAllFunc(htmlContent, func(match []byte) []byte {
-		// Extract the src value
-		srcMatch := regexp.MustCompile(`src="([^"]+)"`).FindSubmatch(match)
-		if len(srcMatch) < 2 {
-			return match // Keep original if we can't parse
-		}
+		m := imgRegex.FindSubmatch(match)
+		src := string(m[2])
 
-		src := string(srcMatch[1])
-
-		// Skip absolute URLs (http://, https://, //)
-		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") || strings.HasPrefix(src, "//") {
-			return match
-		}
-
-		// Skip data URIs (already embedded)
-		if strings.HasPrefix(src, "data:") {
+		// Skip absolute URLs (http://, https://, //) and data URIs
+		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") ||
+			strings.HasPrefix(src, "//") || strings.HasPrefix(src, "data:") {
 			return match
 		}
 
@@ -649,20 +778,208 @@ func embedImages(htmlContent []byte, basePath string) ([]byte, error) {
 			return match
 		}
 
-		// Encode as base64
-		encoded := base64.StdEncoding.EncodeToString(imgData)
+		dataURI := "data:" + getMimeType(imgPath) + ";base64," +
+			base64.StdEncoding.EncodeToString(imgData)
 
-		// Determine MIME type
-		mimeType := getMimeType(imgPath)
-
-		// Create data URI
-		dataURI := "data:" + mimeType + ";base64," + encoded
-
-		// Replace the src with the data URI
-		return []byte(strings.Replace(string(match), src, dataURI, 1))
+		// Rebuild the tag, replacing only the captured src value.
+		out := append([]byte(nil), m[1]...)
+		out = append(out, dataURI...)
+		return append(out, m[3]...)
 	})
 
 	return result, nil
+}
+
+// serveDirList renders a directory listing with a "Download HTML zip" link.
+// It defers to the file server (returns false) for directories that contain an
+// index.html so that default behavior is preserved.
+func serveDirList(w http.ResponseWriter, r *http.Request, urlPath string) bool {
+	dir := filepath.Clean(strings.TrimPrefix(urlPath, "/"))
+	if strings.HasPrefix(dir, "..") {
+		return false
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	type listEntry struct{ Name, Href string }
+	list := make([]listEntry, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		href := (&url.URL{Path: name}).String()
+		list = append(list, listEntry{Name: name, Href: href})
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	dirListTemplate.Execute(w, struct {
+		Title     string
+		BaseCSS   template.CSS
+		CustomCSS template.CSS
+		Entries   []listEntry
+	}{
+		Title:     urlPath,
+		BaseCSS:   template.CSS(markdownCSS),
+		CustomCSS: template.CSS(customCSS),
+		Entries:   list,
+	})
+	return true
+}
+
+// serveExport walks the directory at urlPath and streams a zip in which every
+// .md file is rendered to standalone HTML (with inter-page .md links rewritten
+// to .html) and all other files are copied verbatim, preserving structure.
+// zipEntry creates a deflated zip entry that carries the given modification
+// time, so extracted files keep the source's timestamp instead of the 1980
+// zero-date that zip.Writer.Create leaves.
+func zipEntry(zw *zip.Writer, name string, mod time.Time) (io.Writer, error) {
+	return zw.CreateHeader(&zip.FileHeader{
+		Name:     name,
+		Method:   zip.Deflate,
+		Modified: mod,
+	})
+}
+
+func serveExport(w http.ResponseWriter, r *http.Request, urlPath string) bool {
+	root := filepath.Clean(strings.TrimPrefix(urlPath, "/"))
+	if strings.HasPrefix(root, "..") {
+		return false
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return false
+	}
+
+	base := filepath.Base(root)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		if wd, err := os.Getwd(); err == nil {
+			base = filepath.Base(wd)
+		} else {
+			base = "export"
+		}
+	}
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); p != root && (name == ".serve" || name == ".git") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mod := info.ModTime()
+
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+			f, err := zipEntry(zw, rel, mod)
+			if err != nil {
+				return err
+			}
+			src, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer src.Close()
+			_, err = io.Copy(f, src)
+			return err
+		}
+
+		content, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		var body bytes.Buffer
+		if err := md.Convert(content, &body); err != nil {
+			return err
+		}
+		var htmlBuf bytes.Buffer
+		if err := mdTemplateStandalone.Execute(&htmlBuf, struct {
+			Title     string
+			BaseCSS   template.CSS
+			Content   template.HTML
+			CustomCSS template.CSS
+		}{
+			Title:     strings.TrimSuffix(d.Name(), filepath.Ext(d.Name())),
+			BaseCSS:   template.CSS(markdownCSS),
+			Content:   template.HTML(body.String()),
+			CustomCSS: template.CSS(customCSS),
+		}); err != nil {
+			return err
+		}
+
+		htmlRel := strings.TrimSuffix(rel, filepath.Ext(rel)) + ".html"
+		f, err := zipEntry(zw, htmlRel, mod)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(rewriteMarkdownLinks(htmlBuf.Bytes()))
+		return err
+	})
+	if err != nil {
+		http.Error(w, "failed to export: "+err.Error(), http.StatusInternalServerError)
+		return true
+	}
+	if err := zw.Close(); err != nil {
+		http.Error(w, "failed to finalize zip", http.StatusInternalServerError)
+		return true
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+base+".zip\"")
+	w.Header().Set("Content-Length", strconv.Itoa(zipBuf.Len()))
+	w.Write(zipBuf.Bytes())
+	return true
+}
+
+// rewriteMarkdownLinks rewrites relative <a href> targets that point at .md
+// files to their .html counterparts, preserving any #fragment and leaving
+// external, absolute, and anchor-only links untouched.
+func rewriteMarkdownLinks(html []byte) []byte {
+	linkRegex := regexp.MustCompile(`(<a\b[^>]*\shref=")([^"]+)(")`)
+	return linkRegex.ReplaceAllFunc(html, func(match []byte) []byte {
+		m := linkRegex.FindSubmatch(match)
+		href := string(m[2])
+		switch {
+		case href == "",
+			strings.HasPrefix(href, "#"),
+			strings.HasPrefix(href, "//"),
+			strings.Contains(href, "://"),
+			strings.HasPrefix(href, "mailto:"):
+			return match
+		}
+		target, frag, hasFrag := strings.Cut(href, "#")
+		if !strings.HasSuffix(strings.ToLower(target), ".md") {
+			return match
+		}
+		target = target[:len(target)-len(".md")] + ".html"
+		if hasFrag {
+			target += "#" + frag
+		}
+		return append(append([]byte(nil), m[1]...), append([]byte(target), m[3]...)...)
+	})
 }
 
 func ensureGitignore() {
